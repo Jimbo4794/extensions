@@ -198,14 +198,13 @@ spec:
                     additionalProperties:
                       type: string
                     type: object
+                  clusterSize:
+                    type: integer
                   nodeSelector:
                     additionalProperties:
                       type: string
                     type: object
                   property_cluster_size:
-                    format: int32
-                    type: integer
-                  replicas:
                     format: int32
                     type: integer
                   resources:

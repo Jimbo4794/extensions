@@ -25,9 +25,9 @@ rules:
   - update
   - watch
 - apiGroups:
-  - "networking.k8s.io"
+  - networking.k8s.io
   resources:
-    - ingresses
+  - ingresses
   verbs:
   - create
   - delete
@@ -83,6 +83,7 @@ rules:
   - galasa.dev
   resources:
   - '*'
+  - galasaetcds
   verbs:
   - create
   - delete
@@ -91,3 +92,15 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - etcd.database.coreos.com
+  resources:
+  - etcdclusters
+  verbs:
+  - get
+  - list
+  - watch
+  - create 
+  - delete
+  - patch
+  - update

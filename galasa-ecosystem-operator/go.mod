@@ -4,6 +4,7 @@ go 1.13
 
 require (
 	github.com/coreos/etcd v3.3.22+incompatible
+	github.com/coreos/etcd-operator v0.9.4
 	github.com/coreos/go-etcd v2.0.0+incompatible
 	github.com/go-logr/logr v0.1.0
 	github.com/operator-framework/operator-sdk v0.18.0

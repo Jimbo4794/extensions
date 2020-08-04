@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	etcd "github.com/coreos/etcd-operator/pkg/apis/etcd/v1beta2"
 	galasav1alpha1 "github.com/galasa-dev/extensions/galasa-ecosystem-operator/pkg/apis/galasa/v1alpha1"
 	"github.com/galasa-dev/extensions/galasa-ecosystem-operator/pkg/apiserver"
 	"github.com/galasa-dev/extensions/galasa-ecosystem-operator/pkg/cps"
@@ -47,7 +48,10 @@ func Add(mgr manager.Manager) error {
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	return &ReconcileGalasaEcosystem{client: mgr.GetClient(), scheme: mgr.GetScheme()}
+	r := &ReconcileGalasaEcosystem{client: mgr.GetClient(), scheme: mgr.GetScheme()}
+	// r.scheme.AddKnownTypes(etcd.SchemeGroupVersion, &etcd.EtcdCluster{}, &etcd.EtcdClusterList{}, &etcd.EtcdBackup{}, &etcd.EtcdBackupList{}, &etcd.EtcdRestore{}, &etcd.EtcdRestoreList{})
+
+	return r
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
@@ -66,6 +70,13 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 
 	// Watch for changes to secondary resource Pods and requeue the owner GalasaEcosystem
 	err = c.Watch(&source.Kind{Type: &appsv1.StatefulSet{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &galasav1alpha1.GalasaEcosystem{},
+	})
+	if err != nil {
+		return err
+	}
+	err = c.Watch(&source.Kind{Type: &etcd.EtcdCluster{}}, &handler.EnqueueRequestForOwner{
 		IsController: true,
 		OwnerType:    &galasav1alpha1.GalasaEcosystem{},
 	})
@@ -130,7 +141,7 @@ type ReconcileGalasaEcosystem struct {
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
 func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	reqLogger := log.WithName("Operator-Log") //("Request.Namespace", request.Namespace, "Request.Name", request.Name)
+	reqLogger := log.WithName("Operator-Log")
 	reqLogger.Info("Reconciling GalasaEcosystem")
 
 	// Fetch the GalasaEcosystem instance
@@ -144,7 +155,7 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 
@@ -154,7 +165,7 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 	cps := cpsP{cps.New(instance)}
 	reqLogger.Info("Check operator controller for CPS resource")
 	if err := r.setOperatorController(instance, &cps); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 
@@ -173,13 +184,13 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 
 	reqLogger.Info("Reconcile CPS resource")
 	if err := r.reconcileResources(&cps, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	// Wait for CPS to be ready
-	reqLogger.Info("Waiting for CPS to become ready", "Current ready replicas", cps.StatefulSet.Status.ReadyReplicas)
-	if cps.StatefulSet.Status.ReadyReplicas < 1 {
-		r.ecosystemReady(false, instance)
+	reqLogger.Info("Waiting for CPS to become ready", "CPS Phase", cps.Cluster.Status.Phase)
+	if cps.Cluster.Status.Phase != "Running" {
+		r.ecosystemReady(instance)
 		return reconcile.Result{RequeueAfter: time.Second * 5, Requeue: true}, nil
 	}
 
@@ -187,7 +198,8 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 	if newCpsPvc {
 		reqLogger.Info("Loading Init Props")
 		if err := cps.LoadInitProps(instance); err != nil {
-			r.ecosystemReady(false, instance)
+			reqLogger.Info("Failed here")
+			r.ecosystemReady(instance)
 			return reconcile.Result{}, err
 		}
 		newCpsPvc = false
@@ -201,41 +213,27 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 
 	// Update the Galasa Ecosystem status
 	reqLogger.Info("Updating Galasa Ecosystem Status")
-	instance.Status.CPSReadyReplicas = cps.StatefulSet.Status.ReadyReplicas
+	instance.Status.CPSReadyReplicas = int32(len(cps.Cluster.Status.Members.Ready))
 	r.client.Update(context.TODO(), instance)
 
 	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ RAS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
 	ras := rasP{ras.New(instance)}
 	if err := r.setOperatorController(instance, &ras); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := r.reconcileResources(&ras, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	reqLogger.Info("Waiting for RAS to become ready", "Current ready replicas", ras.StatefulSet.Status.ReadyReplicas)
-	if ras.StatefulSet.Status.ReadyReplicas < 1 {
-		r.ecosystemReady(false, instance)
+	if ras.StatefulSet.Status.ReadyReplicas < *instance.Spec.RasSpec.Replicas {
+		r.ecosystemReady(instance)
 		return reconcile.Result{RequeueAfter: time.Second * 5, Requeue: true}, nil
 	}
 
 	nodePort = getNodePort(ras.ExposedService, "couchdbport")
 	cps.LoadProp("framework.resultarchive.store", "couchdb:"+instance.Spec.ExternalHostname+":"+nodePort)
-
-	// if len(ras.Ingress.Status.LoadBalancer.Ingress) < 1 {
-	// 	r.ecosystemReady(false, instance)
-	// 	return reconcile.Result{RequeueAfter: time.Second * 30, Requeue: true}, nil
-	// }
-
-	// // This appears to be a solution that works for GCP
-	// annotation := ras.Ingress.Annotations
-	// state := annotation["ingress.kubernetes.io/backends"]
-	// reqLogger.Info("The state", "state", state)
-	// if strings.Contains(state, "UNHEALTHY") || strings.Contains(state, "Unknown") {
-	// 	r.ecosystemReady(false, instance)
-	// 	return reconcile.Result{RequeueAfter: time.Second * 30, Requeue: true}, nil
-	// }
 
 	instance.Status.RASReadyReplicas = ras.StatefulSet.Status.ReadyReplicas
 	r.client.Update(context.TODO(), instance)
@@ -244,32 +242,32 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 
 	apiserver := apiP{apiserver.New(instance, cps.ExposedService)}
 	if err := r.setOperatorController(instance, &apiserver); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := r.reconcileResources(&apiserver, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
-	if apiserver.Deployment.Status.ReadyReplicas < 1 {
-		r.ecosystemReady(false, instance)
+	if apiserver.Deployment.Status.ReadyReplicas < *instance.Spec.APIServer.Replicas {
+		r.ecosystemReady(instance)
 		return reconcile.Result{RequeueAfter: time.Second * 10, Requeue: true}, nil
 	}
 
 	instance.Status.APIReadyReplicas = apiserver.Deployment.Status.ReadyReplicas
-	reqLogger.Info("Setting boostrap", "URL", instance.Spec.ExternalHostname+":"+getNodePort(apiserver.ExposedService, "http"))
-	instance.Status.BootstrapURL = instance.Spec.ExternalHostname + ":" + getNodePort(apiserver.ExposedService, "http") + "/boostrap"
+	reqLogger.Info("Setting bootstrap", "URL", instance.Spec.ExternalHostname+":"+getNodePort(apiserver.ExposedService, "http"))
+	instance.Status.BootstrapURL = instance.Spec.ExternalHostname + ":" + getNodePort(apiserver.ExposedService, "http") + "/bootstrap"
 	r.client.Update(context.TODO(), instance)
 
 	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Engine Controller ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
 
 	engineController := engineControllerP{engines.NewController(instance, apiserver.ExposedService)}
 	if err := r.setOperatorController(instance, &engineController); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := r.reconcileResources(&engineController, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 
@@ -279,11 +277,11 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ RESMAN ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
 	resmon := resmonP{engines.NewResmon(instance)}
 	if err := r.setOperatorController(instance, &resmon); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := r.reconcileResources(&resmon, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	instance.Status.ResmonReadyReplicas = resmon.Deployment.Status.ReadyReplicas
@@ -293,11 +291,11 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 	r.client.Update(context.TODO(), instance)
 	simbank := simbankP{simbank.New(instance)}
 	if err := r.setOperatorController(instance, &simbank); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := r.reconcileResources(&simbank, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := simbankSetup(instance, apiserver, cps, simbank); err != nil {
@@ -307,41 +305,70 @@ func (r *ReconcileGalasaEcosystem) Reconcile(request reconcile.Request) (reconci
 	//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Monitoring ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~//
 	grafana := grafanaP{monitoring.NewGrafana(instance)}
 	if err := r.setOperatorController(instance, &grafana); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := r.reconcileResources(&grafana, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	prometheus := prometheusP{monitoring.NewPrometheus(instance)}
 	if err := r.setOperatorController(instance, &prometheus); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := r.reconcileResources(&prometheus, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	metrics := metricsP{monitoring.NewMetrics(instance)}
 	if err := r.setOperatorController(instance, &metrics); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 	if err := r.reconcileResources(&metrics, reqLogger); err != nil {
-		r.ecosystemReady(false, instance)
+		r.ecosystemReady(instance)
 		return reconcile.Result{}, err
 	}
 
 	instance.Status.MonitoringReadyReplicas = metrics.Deployment.Status.ReadyReplicas + prometheus.Deployment.Status.ReadyReplicas + grafana.Deployment.Status.ReadyReplicas
 	r.client.Update(context.TODO(), instance)
-
-	r.ecosystemReady(true, instance)
+	r.ecosystemReady(instance)
 	return reconcile.Result{}, nil
 }
 
-func (r *ReconcileGalasaEcosystem) ecosystemReady(ready bool, instance *galasav1alpha1.GalasaEcosystem) {
-	ecosystemReady = ready
+func ecosystemCheck(instance *galasav1alpha1.GalasaEcosystem) bool {
+	checkLog := log.WithName("Check-Log")
+	checkLog.Info("Instance", "Instance", instance)
+	if instance.Status.CPSReadyReplicas != int32(instance.Spec.Propertystore.ClusterSize) {
+		checkLog.Info("Etcd cluster not ready", "Required", instance.Spec.Propertystore.ClusterSize, "Available", instance.Status.CPSReadyReplicas)
+		return false
+	}
+	if instance.Status.RASReadyReplicas != *instance.Spec.RasSpec.Replicas {
+		checkLog.Info("RAS not ready")
+		return false
+	}
+	if instance.Status.APIReadyReplicas != *instance.Spec.APIServer.Replicas {
+		checkLog.Info("API server not ready")
+		return false
+	}
+	if instance.Status.MonitoringReadyReplicas != *instance.Spec.Monitoring.PrometheusReplicas+*instance.Spec.Monitoring.GrafanaReplicas+*instance.Spec.Monitoring.MetricsReplicas {
+		checkLog.Info("Monitoring not ready")
+		return false
+	}
+	if instance.Status.EngineControllerReadyReplicas != *instance.Spec.EngineController.Replicas {
+		checkLog.Info("Engine Controller not ready")
+		return false
+	}
+	if instance.Status.ResmonReadyReplicas != *instance.Spec.EngineResmon.Replicas {
+		checkLog.Info("Resource Management not ready")
+		return false
+	}
+	return true
+}
+
+func (r *ReconcileGalasaEcosystem) ecosystemReady(instance *galasav1alpha1.GalasaEcosystem) {
+	ecosystemReady = ecosystemCheck(instance)
 	instance.Status.EcosystemReady = ecosystemReady
 	r.client.Update(context.TODO(), instance)
 }
@@ -383,6 +410,112 @@ func getPodNames(pods []corev1.Pod) []string {
 	return podNames
 }
 
+func getNodePort(service *corev1.Service, name string) string {
+	ports := service.Spec.Ports
+	for _, p := range ports {
+		if p.Name == name {
+			return String(p.NodePort)
+		}
+	}
+	return ""
+}
+
+func simbankSetup(cr *galasav1alpha1.GalasaEcosystem, api apiP, cps cpsP, simbank simbankP) error {
+	simlog := log.WithName("SimLog")
+	required := false
+	hostname, _ := url.Parse(cr.Spec.ExternalHostname)
+	location := cr.Spec.ExternalHostname + ":" + getNodePort(api.ExposedService, "http") + "/testcatalog/simbank"
+	simlog.Info("Test catatlog location", "location", location)
+	streams, _ := cps.GetProp("framework.test.streams")
+	simlog.Info("Streams", "Streams", streams)
+	if streams == " " {
+		simlog.Info("No stream set, applying first stream", "Stream", "SIMBANK")
+		cps.LoadProp("framework.test.streams", "SIMBANK")
+		required = true
+
+	} else {
+		if strings.Contains(streams, "SIMBANK") {
+			simlog.Info("Simbank already a test stream")
+		} else {
+			cps.LoadProp("framework.test.streams", streams+",SIMBANK")
+			required = true
+		}
+		simlog.Info("No setup required, skipping")
+	}
+
+	if required {
+		simlog.Info("Putting simbank CPS properties")
+		cps.LoadProp("framework.test.stream.SIMBANK.description", "Simbank tests")
+		cps.LoadProp("framework.test.stream.SIMBANK.location", location)
+		cps.LoadProp("framework.test.stream.SIMBANK.obr", "mvn:dev.galasa/dev.galasa.simbank.obr/"+cr.Spec.GalasaVersion+"/obr")
+		cps.LoadProp("framework.test.stream.SIMBANK.repo", cr.Spec.MavenRepository)
+
+		//Test props
+		cps.LoadProp("secure.credentials.SIMBANK.username", "IBMUSER")
+		cps.LoadProp("secure.credentials.SIMBANK.password", "SYS1")
+
+		cps.LoadProp("zos.dse.tag.SIMBANK.imageid", "SIMBANK")
+		cps.LoadProp("zos.dse.tag.SIMBANK.clusterid", "SIMBANK")
+		cps.LoadProp("zos.image.SIMBANK.ipv4.hostname", hostname.Host)
+		cps.LoadProp("zos.image.SIMBANK.telnet.port", getNodePort(simbank.ExposedService, "simbank-telnet"))
+		cps.LoadProp("zos.image.SIMBANK.telnet.tls", "false")
+		cps.LoadProp("zos.image.SIMBANK.credentials", "SIMBANK")
+		cps.LoadProp("zosmf.server.SIMBANK.images", "SIMBANK")
+		cps.LoadProp("zosmf.server.SIMBANK.hostname", hostname.Host)
+		cps.LoadProp("zosmf.server.SIMBANK.port", getNodePort(simbank.ExposedService, "simbank-mf"))
+
+		cps.LoadProp("simbank.dse.instance.name", "SIMBANK")
+		cps.LoadProp("simbank.instance.SIMBANK.zos.image", "SIMBANK")
+		cps.LoadProp("simbank.instance.SIMBANK.database.port", getNodePort(simbank.ExposedService, "simbank-database"))
+		cps.LoadProp("simbank.instance.SIMBANK.webnet.port", getNodePort(simbank.ExposedService, "simbank-webservice"))
+	}
+
+	if resp, err := http.Get(location); err == nil && resp.StatusCode == 404 {
+		simlog.Info("Checking", "resp", resp, "err", err)
+		simlog.Info("Puting test catalog from simbank tests")
+		if data, err := ioutil.ReadFile("/usr/local/bin/galasa-resources/simplatform-testcatalog.json"); err == nil {
+			client := &http.Client{}
+			req, err := http.NewRequest(http.MethodPut, location, bytes.NewReader(data))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			simlog.Info("Sending testcatalog request")
+			resp, err = client.Do(req)
+			if err != nil {
+				simlog.Info("Failed", "resp", resp, "err", err)
+				return err
+			}
+		} else {
+			return err
+		}
+	} else {
+		simlog.Info("Checking", "resp", resp.StatusCode, "err", err)
+	}
+	return nil
+}
+
+func String(n int32) string {
+	buf := [11]byte{}
+	pos := len(buf)
+	i := int64(n)
+	signed := i < 0
+	if signed {
+		i = -i
+	}
+	for {
+		pos--
+		buf[pos], i = '0'+byte(i%10), i/10
+		if i == 0 {
+			if signed {
+				pos--
+				buf[pos] = '-'
+			}
+			return string(buf[pos:])
+		}
+	}
+}
+
 type resourceObjects struct {
 	Meta    metav1.Object
 	Runtime runtime.Object
@@ -422,20 +555,12 @@ type grafanaP struct {
 func (c *cpsP) getResourceObjects() []resourceObjects {
 	return []resourceObjects{
 		{
-			Meta:    metav1.Object(c.PersistentVolumeClaim),
-			Runtime: runtime.Object(c.PersistentVolumeClaim),
-		},
-		{
 			Meta:    metav1.Object(c.ExposedService),
 			Runtime: runtime.Object(c.ExposedService),
 		},
 		{
-			Meta:    metav1.Object(c.InternalService),
-			Runtime: runtime.Object(c.InternalService),
-		},
-		{
-			Meta:    metav1.Object(c.StatefulSet),
-			Runtime: runtime.Object(c.StatefulSet),
+			Meta:    metav1.Object(c.Cluster),
+			Runtime: runtime.Object(c.Cluster),
 		},
 	}
 }
@@ -621,111 +746,5 @@ func (g *grafanaP) getResourceObjects() []resourceObjects {
 			Meta:    metav1.Object(g.Deployment),
 			Runtime: runtime.Object(g.Deployment),
 		},
-	}
-}
-
-func getNodePort(service *corev1.Service, name string) string {
-	ports := service.Spec.Ports
-	for _, p := range ports {
-		if p.Name == name {
-			return String(p.NodePort)
-		}
-	}
-	return ""
-}
-
-func simbankSetup(cr *galasav1alpha1.GalasaEcosystem, api apiP, cps cpsP, simbank simbankP) error {
-	simlog := log.WithName("SimLog")
-	required := false
-	hostname, _ := url.Parse(cr.Spec.ExternalHostname)
-	location := cr.Spec.ExternalHostname + ":" + getNodePort(api.ExposedService, "http") + "/testcatalog/simbank"
-	simlog.Info("Test catatlog location", "location", location)
-	streams, _ := cps.GetProp("framework.test.streams")
-	simlog.Info("Streams", "Streams", streams)
-	if streams == " " {
-		simlog.Info("No stream set, applying first stream", "Stream", "SIMBANK")
-		cps.LoadProp("framework.test.streams", "SIMBANK")
-		required = true
-
-	} else {
-		if strings.Contains(streams, "SIMBANK") {
-			simlog.Info("Simbank already a test stream")
-		} else {
-			cps.LoadProp("framework.test.streams", streams+",SIMBANK")
-			required = true
-		}
-		simlog.Info("No setup required, skipping")
-	}
-
-	if required {
-		simlog.Info("Putting simbank CPS properties")
-		cps.LoadProp("framework.test.stream.SIMBANK.description", "Simbank tests")
-		cps.LoadProp("framework.test.stream.SIMBANK.location", location)
-		cps.LoadProp("framework.test.stream.SIMBANK.obr", "mvn:dev.galasa/dev.galasa.simbank.obr/"+cr.Spec.GalasaVersion+"/obr")
-		cps.LoadProp("framework.test.stream.SIMBANK.repo", cr.Spec.MavenRepository)
-
-		//Test props
-		cps.LoadProp("secure.credentials.SIMBANK.username", "IBMUSER")
-		cps.LoadProp("secure.credentials.SIMBANK.password", "SYS1")
-
-		cps.LoadProp("zos.dse.tag.SIMBANK.imageid", "SIMBANK")
-		cps.LoadProp("zos.dse.tag.SIMBANK.clusterid", "SIMBANK")
-		cps.LoadProp("zos.image.SIMBANK.ipv4.hostname", hostname.Host)
-		cps.LoadProp("zos.image.SIMBANK.telnet.port", getNodePort(simbank.ExposedService, "simbank-telnet"))
-		cps.LoadProp("zos.image.SIMBANK.telnet.tls", "false")
-		cps.LoadProp("zos.image.SIMBANK.credentials", "SIMBANK")
-		cps.LoadProp("zosmf.server.SIMBANK.images", "SIMBANK")
-		cps.LoadProp("zosmf.server.SIMBANK.hostname", hostname.Host)
-		cps.LoadProp("zosmf.server.SIMBANK.port", getNodePort(simbank.ExposedService, "simbank-mf"))
-
-		cps.LoadProp("simbank.dse.instance.name", "SIMBANK")
-		cps.LoadProp("simbank.instance.SIMBANK.zos.image", "SIMBANK")
-		cps.LoadProp("simbank.instance.SIMBANK.database.port", getNodePort(simbank.ExposedService, "simbank-database"))
-		cps.LoadProp("simbank.instance.SIMBANK.webnet.port", getNodePort(simbank.ExposedService, "simbank-webservice"))
-	}
-
-	if resp, err := http.Get(location); err == nil && resp.StatusCode == 404 {
-		simlog.Info("Checking", "resp", resp, "err", err)
-		simlog.Info("Puting test catalog from simbank tests")
-		if data, err := ioutil.ReadFile("/usr/local/bin/galasa-resources/simplatform-testcatalog.json"); err == nil {
-			client := &http.Client{}
-			req, err := http.NewRequest(http.MethodPut, location, bytes.NewReader(data))
-			if err != nil {
-				return err
-			}
-			req.Header.Set("Content-Type", "application/json")
-			simlog.Info("Sending testcatalog request")
-			resp, err = client.Do(req)
-			if err != nil {
-				simlog.Info("Failed", "resp", resp, "err", err)
-				return err
-			}
-		} else {
-			return err
-		}
-	} else {
-		simlog.Info("Checking", "resp", resp.StatusCode, "err", err)
-	}
-	return nil
-}
-
-func String(n int32) string {
-	buf := [11]byte{}
-	pos := len(buf)
-	i := int64(n)
-	signed := i < 0
-	if signed {
-		i = -i
-	}
-	for {
-		pos--
-		buf[pos], i = '0'+byte(i%10), i/10
-		if i == 0 {
-			if signed {
-				pos--
-				buf[pos] = '-'
-			}
-			return string(buf[pos:])
-		}
 	}
 }

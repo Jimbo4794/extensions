@@ -68,7 +68,7 @@ type RasSpec struct {
 // PropertyStoreCluster spec for the CPS cluster
 type PropertyStoreCluster struct {
 	Resources           corev1.ResourceRequirements `json:"resources,omitempty"`
-	Replicas            *int32                      `json:"replicas,omitempty"`
+	ClusterSize         int                         `json:"clusterSize,omitempty"`
 	PropertyClusterSize int32                       `json:"property_cluster_size,omitempty"`
 	InitProps           map[string]string           `json:"InitProps,omitempty"`
 	NodeSelector        map[string]string           `json:"nodeSelector,omitempty"`

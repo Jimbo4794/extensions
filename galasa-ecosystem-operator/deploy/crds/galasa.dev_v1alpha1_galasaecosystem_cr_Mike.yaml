@@ -25,7 +25,7 @@ spec:
       beta.kubernetes.io/arch: amd64
       platform: hdc
   propertystore:
-    replicas: 1
+    clusterSize: 1
     nodeSelector:
       beta.kubernetes.io/arch: amd64
       platform: hdc
@@ -33,7 +33,6 @@ spec:
     InitProps:
       framework.resource.management.dead.heartbeat.timeout: "30"
       framework.resource.management.finished.timeout: "40"
-
   rasSpec:
     replicas: 1
     nodeSelector:

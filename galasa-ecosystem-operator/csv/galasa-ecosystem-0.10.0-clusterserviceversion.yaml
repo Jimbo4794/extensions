@@ -1,0 +1,226 @@
+apiVersion: operators.coreos.com/v1alpha1
+kind: ClusterServiceVersion
+metadata:
+  name: galasa-ecosystem-operator.v0.10.0
+  namespace: olm
+  annotations:
+    alm-examples: >-
+      [{"apiVersion":"galasa.dev/v1alpha1","kind":"GalasaEcosystem","metadata":{"name":"galasa-ecosystem"},"spec":{"storageClassName":"hdc","galasaVersion":"0.9.0","dockerRegistry":"docker.galasa.dev","mavenRepository":"https://nexus.galasa.dev/repository/maven-prod/","externalhostname":"<HOSTNAME>","config":{"node_arch":"amd64"},"engineController":{"replicas":1},"engineResmon":{"replicas":1},"apiserver":{"replicas":1,"storage":"200m"},"propertystore":{"replicas":1,"storage":"200m","InitProps":{"framework.resource.management.dead.heartbeat.timeout":"30","framework.resource.management.finished.timeout":"40"}},"rasSpec":{"replicas":1,"storage":"200m"},"simbank":{"replicas":1},"monitoring":{"grafanaReplicas":1,"grafanaStorage":"200m","prometheusReplicas":1,"prometheusStorage":"200m","metricsReplicas":1,"metricsStorage":"200m"}}}]
+    categories: ''
+    certified: 'false'
+    createdAt: ''
+    description: ''
+    containerImage: ''
+    support: ''
+    capabilities: Basic Install
+    repository: 'https://github.com/galasa-dev/extensions'
+spec:
+  displayName: 'Galasa Ecosystem Operator'
+  description: |
+    ## Introduction
+
+    This operator is intended for Galasa users who are looking to set up an automation ecosystem. As testing workloads are required to be run off local workspaces and inside a kubernetes cluster, a supporting galasa ecosystem is required to provide runtime configurations, list and lock test resources, store for test results, logs and artifacts. Other services that control the running tests will also be instantiated.
+
+    ## About this Operator
+
+    This operator brings up and configures a galasa ecosystem in a single namespace. It will bring up:
+      - An Engine Controller responsible for test scheduling
+      - An API server which will provide an endpoint for bootstrap properties, as well as the endpoint used to submit tests
+      - A resource management server which will be responsible for catching any cold resources or tests
+      - A etcd cluster that will be used for configurational information and dynamic status information.
+      - A couchDB used to store test runs, logs and artifacts.
+      - A Set of monitoring services including a grafana, prometheus and a metrics server 
+      - An example Application called SIMBANK which can be used to validate the installation
+
+    ## Prerequisites for enabling this Operator
+
+    - [Kubernetes v1.16 or above](https://Kubernetes.io/docs/setup/) <br>
+        - Minimum CPU : 6vCPU
+        - Minimum Memory : 6GB
+    - Access to pull the operator image
+
+    ## TODO: Create a install guide and kubectl command list for getting information like state and bootstrap URL
+
+  maturity: 'alpha'
+  version: 0.10.0
+  replaces: ''
+  minKubeVersion: ''
+  keywords: []
+  maintainers:
+    - name: 'James Davies'
+      email: 'james.davies@ibm.com'
+  provider:
+    name: 'IBM'
+  labels: {}
+  selector:
+    matchLabels: {}
+  links:
+    - name: 'Galasa'
+      url: 'https://galasa.dev'
+  icon:
+    - base64data: ''
+      mediatype: ''
+  customresourcedefinitions:
+    owned:
+      - name: galasaecosystems.galasa.dev
+        displayName: GalasaEcosystem
+        kind: GalasaEcosystem
+        version: v1alpha1
+        description: Galasa Ecosystem
+        resources:
+          - version: v1
+            name: "Deploylment"
+            kind: Deployment
+          - version: v1
+            name: "Service"
+            kind: Service
+          - version: v1
+            name: "ReplicaSet"
+            kind: ReplicaSet
+          - version: v1
+            name: "Pod"
+            kind: Pod
+          - version: v1
+            name: "Secret"
+            kind: Secret
+          - version: v1
+            name: "ConfigMap"
+            kind: ConfigMap
+        specDescriptors: []
+        statusDescriptors: []
+  install:
+    strategy: deployment
+    spec:
+      permissions:
+        - serviceAccountName: galasa-ecosystem-operator
+          rules:
+            - apiGroups:
+                - ''
+              resources:
+                - pods
+                - pods/exec
+                - services
+                - services/finalizers
+                - endpoints
+                - persistentvolumeclaims
+                - events
+                - configmaps
+                - secrets
+              verbs:
+                - create
+                - delete
+                - get
+                - list
+                - patch
+                - update
+                - watch
+            - apiGroups:
+                - networking.k8s.io
+              resources:
+                - ingresses
+              verbs:
+                - create
+                - delete
+                - get
+                - list
+                - patch
+                - update
+                - watch
+            - apiGroups:
+                - apps
+              resources:
+                - deployments
+                - daemonsets
+                - replicasets
+                - statefulsets
+              verbs:
+                - create
+                - delete
+                - get
+                - list
+                - patch
+                - update
+                - watch
+            - apiGroups:
+                - monitoring.coreos.com
+              resources:
+                - servicemonitors
+              verbs:
+                - get
+                - create
+            - apiGroups:
+                - apps
+              resourceNames:
+                - galasa-ecosystem-operator
+              resources:
+                - deployments/finalizers
+              verbs:
+                - update
+            - apiGroups:
+                - ''
+              resources:
+                - pods
+              verbs:
+                - get
+            - apiGroups:
+                - apps
+              resources:
+                - replicasets
+                - deployments
+              verbs:
+                - get
+            - apiGroups:
+                - galasa.dev
+              resources:
+                - '*'
+              verbs:
+                - create
+                - delete
+                - get
+                - list
+                - patch
+                - update
+                - watch
+      clusterPermissions: []
+      deployments:
+        - name: galasa-ecosystem-operator
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                name: galasa-ecosystem-operator
+            template:
+              metadata:
+                labels:
+                  name: galasa-ecosystem-operator
+              spec:
+                nodeSelector:
+                  beta.kubernetes.io/arch: amd64
+                serviceAccountName: galasa-ecosystem-operator
+                containers:
+                  - name: galasa-ecosystem-operator
+                    image: >-
+                      gcr.io/nice-diorama-280715/galasa-ecosystem-operator:latest
+                    command:
+                      - galasa-ecosystem-operator
+                    imagePullPolicy: Always
+                    env:
+                      - name: WATCH_NAMESPACE
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.namespace
+                      - name: POD_NAME
+                        valueFrom:
+                          fieldRef:
+                            fieldPath: metadata.name
+                      - name: OPERATOR_NAME
+                        value: galasa-ecosystem-operator
+  installModes:
+    - type: OwnNamespace
+      supported: true
+    - type: SingleNamespace
+      supported: true
+    - type: MultiNamespace
+      supported: false
+    - type: AllNamespaces
+      supported: false
